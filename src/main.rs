@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use chrono::{DateTime, FixedOffset, NaiveDateTime, DurationRound, Duration};
+use chrono::{DateTime, FixedOffset, NaiveDateTime};
 use clap::Parser;
 use git2::{Repository, Signature, Time};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -61,9 +61,8 @@ fn maybe_redact_signature<'a>(
             .map(|e| e.trim().to_lowercase().into_bytes());
         hasher.update(
             email_string
-                .as_ref()
-                .map(|e| e.as_slice())
-                .unwrap_or(signature.email_bytes()),
+                .as_deref()
+                .unwrap_or_else(|| signature.email_bytes()),
         );
         let mut hasher_output = hasher.finalize_xof();
         let mut email_bytes = [0u8; 12];
@@ -72,7 +71,14 @@ fn maybe_redact_signature<'a>(
         Signature::new(
             &hex::encode(&name_bytes),
             &format!("{}@redacted.invalid", hex::encode(&email_bytes)),
-            &maybe_redact_timestamp(&opts, signature.when()),
+            &maybe_redact_timestamp(opts, signature.when()),
+        )
+        .unwrap()
+    } else if opts.redact_timestamps {
+        Signature::new(
+            unsafe { std::str::from_utf8_unchecked(signature.name_bytes()) },
+            unsafe { std::str::from_utf8_unchecked(signature.email_bytes()) },
+            &maybe_redact_timestamp(opts, signature.when()),
         )
         .unwrap()
     } else {
@@ -117,7 +123,7 @@ fn main() {
                 parents_mapped.push(target_repo.find_commit(*oid).unwrap());
             }
 
-            let parent_references = parents_mapped.iter().map(|c| c).collect::<Vec<_>>();
+            let parent_references = parents_mapped.iter().collect::<Vec<_>>();
 
             let target_oid = target_repo
                 .commit(

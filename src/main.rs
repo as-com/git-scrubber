@@ -1,7 +1,8 @@
 use std::{collections::HashMap, path::PathBuf};
 
+use chrono::{DateTime, FixedOffset, NaiveDateTime, DurationRound, Duration};
 use clap::Parser;
-use git2::{Repository, Signature};
+use git2::{Repository, Signature, Time};
 use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser, Debug)]
@@ -20,8 +21,26 @@ struct Args {
     #[clap(short = 'u', long)]
     redact_users: bool,
 
+    /// Truncate timestamps to the nearest day
+    #[clap(short = 't', long)]
+    redact_timestamps: bool,
+
     /// Key to use when hashing user identities
     key: Option<String>,
+}
+
+fn maybe_redact_timestamp(opts: &Args, time: Time) -> Time {
+    if opts.redact_timestamps {
+        let dt: DateTime<FixedOffset> = DateTime::from_utc(
+            NaiveDateTime::from_timestamp(time.seconds(), 0),
+            FixedOffset::east(time.offset_minutes() * 60),
+        );
+
+        let rounded = dt.date().and_hms(0, 0, 0);
+        Time::new(rounded.timestamp(), time.offset_minutes())
+    } else {
+        time
+    }
 }
 
 fn maybe_redact_signature<'a>(
@@ -53,7 +72,7 @@ fn maybe_redact_signature<'a>(
         Signature::new(
             &hex::encode(&name_bytes),
             &format!("{}@redacted.invalid", hex::encode(&email_bytes)),
-            &signature.when(),
+            &maybe_redact_timestamp(&opts, signature.when()),
         )
         .unwrap()
     } else {

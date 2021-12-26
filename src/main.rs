@@ -1,33 +1,70 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use clap::Parser;
-use git2::{Commit, Oid, Repository, Tree};
+use git2::{Repository, Signature};
 use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 struct Args {
+    /// Path to Git repository to read commits from
     path: PathBuf,
+
+    /// Branch, tag, or commit to read commits from
     reference: String,
+
+    /// Path where new Git repository will be created
     target: PathBuf,
+
+    /// Redact user identities with a cryptographic hash
+    #[clap(short = 'u', long)]
+    redact_users: bool,
+
+    /// Key to use when hashing user identities
+    key: Option<String>,
 }
 
-// fn copy_commits(commit: Commit, target_repo: &Repository, tree: &Tree) -> Oid {
-//     let mut copied_parent_commits = Vec::with_capacity(commit.parent_count());
-//     for parent in commit.parents() {
-//         let oid = copy_commits(parent, target_repo, tree);
-//         copied_parent_commits.push(target_repo.find_commit(oid).unwrap());
-//     }
+fn maybe_redact_signature<'a>(
+    opts: &Args,
+    blake3_key: &[u8; 32],
+    signature: Signature<'a>,
+) -> Signature<'a> {
+    if opts.redact_users {
+        let mut hasher = blake3::Hasher::new_keyed(blake3_key);
+        hasher.update(signature.name_bytes());
+        let mut hasher_output = hasher.finalize_xof();
+        let mut name_bytes = [0u8; 12];
+        hasher_output.fill(&mut name_bytes);
 
-//     let parent_references = copied_parent_commits.iter().map(|c| c).collect::<Vec<_>>();
+        let mut hasher = blake3::Hasher::new_keyed(blake3_key);
+        let email_string = signature
+            .email()
+            .map(|e| e.trim().to_lowercase().into_bytes());
+        hasher.update(
+            email_string
+                .as_ref()
+                .map(|e| e.as_slice())
+                .unwrap_or(signature.email_bytes()),
+        );
+        let mut hasher_output = hasher.finalize_xof();
+        let mut email_bytes = [0u8; 12];
+        hasher_output.fill(&mut email_bytes);
 
-//     target_repo.commit(None, &commit.author(), &commit.committer(), "redacted", tree, &parent_references).unwrap()
-// }
+        Signature::new(
+            &hex::encode(&name_bytes),
+            &format!("{}@redacted.invalid", hex::encode(&email_bytes)),
+            &signature.when(),
+        )
+        .unwrap()
+    } else {
+        signature
+    }
+}
 
 fn main() {
     let args = Args::parse();
 
-    let repo = Repository::open(args.path).expect("failed to open repository");
+    let repo = Repository::open(&args.path).expect("failed to open repository");
     let reference = repo
         .resolve_reference_from_short_name(&args.reference)
         .expect("failed to open reference");
@@ -35,9 +72,14 @@ fn main() {
         .peel_to_commit()
         .expect("failed to peel to commit");
 
-    let target_repo = Repository::init(args.target).expect("failed to create target repo");
+    let target_repo = Repository::init(&args.target).expect("failed to create target repo");
     let empty_tree = target_repo.treebuilder(None).unwrap().write().unwrap();
     let empty_tree = target_repo.find_tree(empty_tree).unwrap();
+
+    let blake3_key = blake3::derive_key(
+        "git-scrubber",
+        args.key.as_deref().unwrap_or("default_key").as_bytes(),
+    );
 
     let spinner_style =
         ProgressStyle::default_spinner().template("{spinner} {pos:>7} @ {per_sec} {msg}");
@@ -61,8 +103,8 @@ fn main() {
             let target_oid = target_repo
                 .commit(
                     None,
-                    &commit.author(),
-                    &commit.committer(),
+                    &maybe_redact_signature(&args, &blake3_key, commit.author()),
+                    &maybe_redact_signature(&args, &blake3_key, commit.committer()),
                     "redacted",
                     &empty_tree,
                     &parent_references,

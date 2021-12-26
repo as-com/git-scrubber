@@ -26,6 +26,7 @@ struct Args {
     redact_timestamps: bool,
 
     /// Key to use when hashing user identities
+    #[clap(short = 'k', long)]
     key: Option<String>,
 }
 
